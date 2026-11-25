@@ -222,7 +222,7 @@ const BANK={"AUTO":[["C1-01","Corto",1,1,0,3.2,29,16000,1,8,3,1,12,1800,0,0,1800
    Pegue en DEFAULT_URL la URL /exec de la implementación de Apps Script
    (también se puede configurar desde Ajustes, en cada dispositivo).
    ===================================================================== */
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.2.2";
 const DEFAULT_URL = "https://script.google.com/macros/s/AKfycbwoPsSvgxFOvos5Z8YCmKp0rQRee_-IGrvN4B3awzrHLwFtncoRqq3AxBJxFwNF4-1owQ/exec";
 
 /* ---------- Almacenamiento local ---------- */
@@ -320,7 +320,7 @@ function generarFichas(rec){
     rec.elecciones = tareas.map((t,i)=>{
       const id = perfil[0] + bloque + "-0" + t, f = BANK.TPC[id];
       return {orden:i+1, tarea:t, ficha:id, catalogo:(perfil==="Corto"?0:perfil==="Medio"?12:24)+(bloque-1)*6+t,
-              A:f.A, B:f.B, respuesta:"", segundos:null, motivo_omision:"", usaria:"", usaria_porque:""};
+              A:f.A, B:f.B, respuesta:"", segundos:null, motivo_omision:""};
     });
     return;
   }
@@ -433,7 +433,6 @@ function fieldsFor(step, d){
     {k:"com", t:"likert", req:1, items:COM_ITEMS, label:"Preferencias de comodidad: importancia de cada atributo"}
   ];
   case "cierre": return [
-    {k:"entendio_cambio", t:"text", label:"¿Qué entendió por «cambio de bus»?", show:d=>tpc(d)&&!!S.rec.elecciones},
     {k:"situacion_imposible", t:"text", label:"¿Alguna de las situaciones le pareció imposible? ¿Cuál?", show:()=>!!(S.rec.elecciones&&S.rec.elecciones.length)},
     {k:"observaciones", t:"area", label:"Observaciones del encuestador"}
   ];
@@ -686,9 +685,6 @@ function vFicha(){
       ${e.motivo_omision || S._omit ? `<div class="lbl" style="font-weight:700;margin:8px 0 6px">Motivo de la omisión</div><div class="chips">${OP.omision.map(o=>`<button type="button" class="chip${e.motivo_omision===o?" sel":""}" data-omit="${esc(o)}">${esc(o)}</button>`).join("")}</div>`
         : `<button class="btn ghost block" data-act="omit">No responde</button>`}
     </div>
-    ${mod==="TPC" && e.respuesta ? `<div style="margin-top:14px"><div class="lbl" style="font-weight:700;margin-bottom:6px">¿Realmente usaría la ruta escogida?</div>
-      <div class="chips">${OP.sn.map(o=>`<button type="button" class="chip${e.usaria===o[0]?" sel":""}" data-usaria="${o[0]}">${o[1]}</button>`).join("")}</div>
-      <input type="text" data-porque="1" placeholder="¿Por qué? (opcional)" value="${esc(e.usaria_porque)}" style="margin-top:8px"></div>` : ""}
     <p class="note">${nota}</p>
   </div>
   <nav class="nav"><div class="in">
@@ -784,7 +780,7 @@ function filasElecciones(r){
       out.push({id:r.id, caso:e.orden, tarea:e.ficha, alternativa:L, elegida: e.respuesta ? (e.respuesta===L?1:0) : "",
         a_bordo_min:x[0], tarifa_cop:x[1], transbordos:x[2], caminata_enlace_min:x[3], espera_enlace_min:x[4],
         municipio:d.municipio_encuesta, perfil:r.diseno.perfil, bloque:r.diseno.bloque,
-        orden:e.orden, catalogo:e.catalogo, segundos:e.segundos ?? "", motivo_omision:e.motivo_omision, usaria:e.usaria, usaria_porque:e.usaria_porque,
+        orden:e.orden, catalogo:e.catalogo, segundos:e.segundos ?? "", motivo_omision:e.motivo_omision,
         encuestador:d.encuestador, fecha:r.fin});
     }));
     return {priv:[], tpc:out};
@@ -924,11 +920,10 @@ app.addEventListener("click", ev=>{
   }
   if(t.dataset.omit){
     const e = S.rec.elecciones[S.ficha];
-    e.respuesta = ""; e.eligio_tp = null; e.motivo_omision = t.dataset.omit; e.usaria = "";
+    e.respuesta = ""; e.eligio_tp = null; e.motivo_omision = t.dataset.omit;
     e.segundos = e._t0 ? Math.round((Date.now()-e._t0)/1000) : e.segundos;
     saveDraft(); render(); return;
   }
-  if(t.dataset.usaria){ const e = S.rec.elecciones[S.ficha]; e.usaria = t.dataset.usaria; saveDraft(); t.parentElement.querySelectorAll("button").forEach(b=>b.classList.toggle("sel", b===t)); return; }
 
   switch(t.dataset.act){
     case "new": newSurvey(); break;
@@ -978,7 +973,6 @@ app.addEventListener("click", ev=>{
 
 app.addEventListener("input", ev=>{
   const t = ev.target; if(!S.rec) return; const d = S.rec.datos;
-  if(t.dataset.porque){ S.rec.elecciones[S.ficha].usaria_porque = t.value; saveDraft(); return; }
   if(t.dataset.k){
     const f = S.fields.find(x=>x.k===t.dataset.k);
     d[t.dataset.k] = (t.type==="number") ? (t.value===""?"":Number(t.value)) : t.value;
