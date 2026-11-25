@@ -223,7 +223,7 @@ const BANK={"AUTO":[["C1-01","Corto",1,1,0,3.2,29,16000,1,8,3,1,12,1800,0,0,1800
    (también se puede configurar desde Ajustes, en cada dispositivo).
    ===================================================================== */
 const APP_VERSION = "1.1.0";
-const DEFAULT_URL = "";
+const DEFAULT_URL = "https://script.google.com/macros/s/AKfycbwoPsSvgxFOvos5Z8YCmKp0rQRee_-IGrvN4B3awzrHLwFtncoRqq3AxBJxFwNF4-1owQ/exec";
 const DEFAULT_GAS_PRICE = 16000;
 
 /* ---------- Almacenamiento local ---------- */
@@ -235,6 +235,7 @@ const LS = {
   del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
 let CFG = Object.assign({encuestador:"", url:DEFAULT_URL, precio:DEFAULT_GAS_PRICE, device:""}, LS.get(K.cfg, {}));
+if(!CFG.url && DEFAULT_URL) CFG.url = DEFAULT_URL; // los equipos que abrieron la app antes de fijar la URL la toman al actualizarse
 if(!CFG.device){ CFG.device = "DSP-" + Math.random().toString(36).slice(2,7).toUpperCase(); LS.set(K.cfg, CFG); }
 if(navigator.storage && navigator.storage.persist){ navigator.storage.persist().catch(()=>{}); }
 
