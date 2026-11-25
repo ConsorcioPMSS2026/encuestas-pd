@@ -1,5 +1,5 @@
 /* Service worker: permite abrir y usar la app sin conexión. */
-const CACHE = "pd-encuestas-v1.1.0";
+const CACHE = "pd-encuestas-v1.2.1";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {

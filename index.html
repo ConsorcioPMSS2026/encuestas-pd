@@ -222,9 +222,8 @@ const BANK={"AUTO":[["C1-01","Corto",1,1,0,3.2,29,16000,1,8,3,1,12,1800,0,0,1800
    Pegue en DEFAULT_URL la URL /exec de la implementación de Apps Script
    (también se puede configurar desde Ajustes, en cada dispositivo).
    ===================================================================== */
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.1";
 const DEFAULT_URL = "https://script.google.com/macros/s/AKfycbwoPsSvgxFOvos5Z8YCmKp0rQRee_-IGrvN4B3awzrHLwFtncoRqq3AxBJxFwNF4-1owQ/exec";
-const DEFAULT_GAS_PRICE = 16000;
 
 /* ---------- Almacenamiento local ---------- */
 const K = {cfg:"pd_cfg", queue:"pd_queue", draft:"pd_draft", bal:"pd_balance"};
@@ -234,7 +233,7 @@ const LS = {
               catch(e){ alert("No hay espacio suficiente en el dispositivo. Exporte las encuestas (JSON) y elimine las ya enviadas."); return false; } },
   del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
-let CFG = Object.assign({encuestador:"", url:DEFAULT_URL, precio:DEFAULT_GAS_PRICE, device:""}, LS.get(K.cfg, {}));
+let CFG = Object.assign({encuestador:"", url:DEFAULT_URL, device:""}, LS.get(K.cfg, {}));
 if(!CFG.url && DEFAULT_URL) CFG.url = DEFAULT_URL; // los equipos que abrieron la app antes de fijar la URL la toman al actualizarse
 if(!CFG.device){ CFG.device = "DSP-" + Math.random().toString(36).slice(2,7).toUpperCase(); LS.set(K.cfg, CFG); }
 if(navigator.storage && navigator.storage.persist){ navigator.storage.persist().catch(()=>{}); }
@@ -283,47 +282,35 @@ const MODS = {
   TPC:{nombre:"Transporte público colectivo", corto:"TPC", desc:"Usuario de bus: elige entre dos rutas"},
   AUTO:{nombre:"Automóvil", corto:"Automóvil", desc:"Conductor de auto frente a bus directo"},
   MOTO:{nombre:"Motocicleta", corto:"Moto", desc:"Conductor de moto frente a bus directo"},
-  TAXI:{nombre:"Taxi / App", corto:"Taxi / App", desc:"Usuario de taxi o app frente a bus directo"}
+  TAXI:{nombre:"App-Taxi", corto:"App-Taxi", desc:"Usuario de taxi o app frente a bus directo"},
+  BICI:{nombre:"Bicicleta", corto:"Bicicleta", desc:"Sin ficha de elección"}
 };
+function moduloDe(d){ return d.tipo_servicio === "PUB" ? "TPC" : (d.tipo_servicio === "PRIV" ? (d.modo_privado || "") : ""); }
 const isPriv = d => d.modulo && d.modulo !== "TPC";
 const COLS = ["ficha","perfil","bloque","tarea","peaje_aplica","distancia_km","rendimiento_km_galon","precio_cop_galon","participacion_conductor","auto_conduccion_min","auto_busca_min","auto_caminata_min","auto_total_min","gasolina_cop","peaje_cop","parqueo_cop","auto_total_cop","tp_bordo_min","tp_caminata_min","tp_espera_min","tp_total_min","tp_tarifa_cop"];
 const bankRow = arr => { const o = {}; COLS.forEach((c,i)=>o[c]=arr[i]); return o; };
 
-function perfilDe(min){ min = num(min); if(min == null) return null; return min < 15 ? "Corto" : (min <= 30 ? "Medio" : "Largo"); }
+function perfilDe(min){ min = num(min); if(min == null) return null; return min <= 15 ? "Corto" : (min <= 30 ? "Medio" : "Largo"); }
 function tiempoPerfil(d){ return d.modulo === "TPC" ? d.tiempo_vehiculo_min : d.tiempo_viaje_min; }
-function kmGal(d){ const r = num(d.rendimiento); if(!r) return null; return d.rend_unidad === "km/L" ? r*3.78541 : r; }
 function filtro(d){
-  if(!isPriv(d)) return "Aplica";
-  const m = [];
-  if(d.modulo !== "TAXI" && d.es_conductor === "N") m.push("no es conductor");
-  if(d.puede_elegir === "N") m.push("no puede elegir el modo");
-  if(d.tp_directo === "N") m.push("no existe bus directo factible");
-  return m.length ? "No aplica: " + m.join(", ") : "Aplica";
-}
-function costosRef(d){
-  const km = num(d.distancia_km), kg = kmGal(d), pr = num(d.precio_galon), fg = (num(d.frac_gasolina) ?? 100)/100;
-  const gas = (km && kg && pr) ? km/kg*pr*fg : null;
-  const peaje = d.paga_peaje === "S" ? (num(d.valor_peaje)||0)*((num(d.frac_peaje) ?? 100)/100) : 0;
-  const parq = d.paga_parqueo === "S" ? (num(d.costo_parqueo)||0)*((num(d.frac_parqueo) ?? 100)/100) : 0;
-  const total = gas == null ? null : gas + peaje + parq;
-  const gp = d.gasto_no_sabe ? null : num(d.gasto_percibido);
-  return {gas, peaje, parq, total, brecha: (total != null && gp != null) ? total - gp : null};
+  if(d.modulo === "BICI") return "No aplica: el modo bicicleta no tiene ficha de elección";
+  return "Aplica";
 }
 
-/* Balance de bloques por municipio y perfil (en este dispositivo) */
-function bloqueBalanceado(mod, mun, perfil){
-  const bal = LS.get(K.bal, {}); const c = bal[mod+"|"+mun+"|"+perfil] || {1:0,2:0};
+/* Asignación de bloque: alterna entre encuestados (1, 2, 1, 2…) por módulo y perfil, con inicio aleatorio */
+function bloqueBalanceado(mod, perfil){
+  const bal = LS.get(K.bal, {}); const c = bal[mod+"|"+perfil] || {1:0,2:0};
   if(c[1] < c[2]) return 1; if(c[2] < c[1]) return 2; return Math.random() < .5 ? 1 : 2;
 }
 function registrarBalance(rec){
   if(!rec.diseno || !rec.diseno.bloque || !rec.elecciones || !rec.elecciones.length) return;
-  const bal = LS.get(K.bal, {}); const key = rec.datos.modulo+"|"+rec.datos.municipio_encuesta+"|"+rec.diseno.perfil;
+  const bal = LS.get(K.bal, {}); const key = rec.datos.modulo+"|"+rec.diseno.perfil;
   bal[key] = bal[key] || {1:0,2:0}; bal[key][rec.diseno.bloque]++; LS.set(K.bal, bal);
 }
 function sugerirBloque(rec){
   const d = rec.datos, perfil = perfilDe(tiempoPerfil(d));
   if(!perfil) return {perfil:null, bloque:null, regla:""};
-  return {perfil, bloque:bloqueBalanceado(d.modulo, d.municipio_encuesta, perfil), regla:"Aleatorio balanceado por municipio y perfil"};
+  return {perfil, bloque:bloqueBalanceado(d.modulo, perfil), regla:"Aleatorio, alternando entre encuestados"};
 }
 /* Generación de las seis fichas */
 function generarFichas(rec){
@@ -338,29 +325,11 @@ function generarFichas(rec){
     return;
   }
   const rows = BANK[mod].map(bankRow);
-  const media = (()=>{ const r = rows.filter(x=>x.perfil===perfil); return r.reduce((s,x)=>s+x.rendimiento_km_galon,0)/r.length; })();
-  const kg = kmGal(d), km = num(d.distancia_km), pr = num(d.precio_galon) || CFG.precio;
-  const fg = (num(d.frac_gasolina) ?? 100)/100;
-  const adapt = mod !== "TAXI" && d.tecnologia !== "Eléctrico" && km > 0 && kg > 0;
-  const fp = (mod !== "TAXI" && d.paga_peaje === "S") ? (num(d.frac_peaje) ?? 100)/100 : 1;
-  const fq = (mod === "TAXI") ? 1 : (d.paga_parqueo === "S" ? (num(d.frac_parqueo) ?? 100)/100 : 1);
-  const lado0 = Math.random() < .5 ? "A" : "B";
-  rec.diseno.gasolina_adaptada = adapt ? 1 : 0;
   rec.elecciones = tareas.map((t,i)=>{
     const idx = rows.findIndex(x=>x.perfil===perfil && x.bloque===bloque && x.tarea===t), b = rows[idx];
-    const rendAdapt = adapt ? kg*(b.rendimiento_km_galon/media) : b.rendimiento_km_galon;
-    const gas = adapt ? r100(km/rendAdapt*pr*fg) : b.gasolina_cop;
-    const peaje = r100(b.peaje_cop*fp), parq = r100(b.parqueo_cop*fq);
     return Object.assign({}, b, {
-      orden:i+1, catalogo:idx+1,
-      distancia_km: adapt ? km : b.distancia_km,
-      rendimiento_km_galon: Math.round(rendAdapt*100)/100,
-      precio_cop_galon: adapt ? pr : b.precio_cop_galon,
-      participacion_conductor: adapt ? fg : b.participacion_conductor,
-      gasolina_cop:gas, peaje_cop:peaje, parqueo_cop:parq, auto_total_cop:gas+peaje+parq,
-      lado_tp: i%2===0 ? (lado0==="A"?"A":"B") : (lado0==="A"?"B":"A"),
-      respuesta:"", eligio_tp:null, segundos:null, motivo_omision:"",
-      fraccion_peaje:fp, fraccion_parqueo:fq
+      orden:i+1, catalogo:idx+1, lado_tp:"B",
+      respuesta:"", eligio_tp:null, segundos:null, motivo_omision:""
     });
   });
 }
@@ -377,16 +346,18 @@ function fieldsFor(step, d){
   const M = d.modulo;
   switch(step){
   case "control": return [
-    {k:"modulo", t:"cards", label:"Módulo de la encuesta", req:1, opts:Object.keys(MODS).map(k=>[k,MODS[k].nombre,MODS[k].desc])},
-    {k:"encuestador", t:"text", label:"Encuestador", req:1},
-    {k:"municipio_encuesta", t:"chips", label:"Municipio de la encuesta", req:1, opts:MUN.slice(0,3)},
-    {k:"punto_encuesta", t:"text", label:"Punto o sitio de encuesta", help:"Paradero, estacionamiento, establecimiento o referencia general."},
-    {k:"clima", t:"chips", label:"Estado del clima", opts:OP.clima},
-    {k:"tipo_vehiculo", t:"chips", label:"Tipo de vehículo interceptado", req:1, show:tpc, opts:[[3,"Bus intermunicipal"],[4,"Bus urbano - veredal"],[5,"Otro"]]},
+    {k:"tipo_servicio", t:"cards", label:"Tipo de encuesta", req:1, opts:[["PUB","PD Público","Usuario de transporte público colectivo"],["PRIV","PD Privado","Usuario de auto, moto, app-taxi o bicicleta"]]},
+    {k:"tipo_vehiculo", t:"chips", label:"Tipo de vehículo", req:1, show:tpc, opts:[[3,"Bus intermunicipal"],[4,"Bus urbano - veredal"],[5,"Otro"]]},
     {k:"tipo_vehiculo_otro", t:"text", label:"¿Cuál?", show:d=>tpc(d)&&d.tipo_vehiculo==5},
-    {k:"tecnologia", t:"chips", label:"Tecnología del vehículo", req:1, show:priv, opts:["Gasolina","Híbrido","Eléctrico"]},
-    {k:"_tecno_info", t:"info", show:d=>veh(d)&&d.tecnologia==="Eléctrico", cls:"warn",
-      html:()=>"El cálculo de gasolina de las fichas usa galones. Con vehículo eléctrico se mostrarán los valores del banco sin adaptar; registre la situación en observaciones."},
+    {k:"modo_privado", t:"chips", label:"Modo", req:1, show:d=>d.tipo_servicio==="PRIV", opts:[["AUTO","Auto"],["MOTO","Moto"],["TAXI","App-Taxi"],["BICI","Bicicleta"]],
+      help:"El modo define la ficha del registro de elección (Auto, Moto o App-Taxi)."},
+    {k:"tecnologia", t:"chips", label:"Tecnología", req:1, show:d=>priv(d)&&d.modulo!=="BICI", opts:["Gasolina","Híbrido","Eléctrico"]},
+    {t:"h", label:"Datos de la encuesta"},
+    {k:"encuestador", t:"text", label:"Encuestador", req:1},
+    {k:"municipio_encuesta", t:"chips", label:"Municipio de la encuesta", req:1, opts:["Madrid","Funza"]},
+    {k:"punto_encuesta", t:"text", label:"Punto o sitio de encuesta"},
+    {k:"clima", t:"chips", label:"Estado del clima", opts:OP.clima},
+    {k:"_fecha", t:"info", html:d=>"Fecha de encuesta: <b>"+esc(d.fecha_encuesta||"")+"</b> · Hora encuesta: <b>"+esc(d.hora_encuesta||"")+"</b>"},
     {k:"_gps", t:"gps", label:"Ubicación de la encuesta"}
   ];
   case "persona": return [
@@ -435,34 +406,15 @@ function fieldsFor(step, d){
       {k:"margen_minutos", t:"num", label:"¿Cuántos minutos está dispuesto a esperar el bus?", unit:"min"}
     );
     else f.push(
-      {t:"h", label:"Condiciones para aplicar el módulo"},
-      {k:"es_conductor", t:"chips", label:"¿Conducía usted el vehículo en este viaje?", req:1, show:veh, opts:OP.sn, help:"El módulo cubre conductores; si es acompañante, el bloque de elección no aplica."},
-      {k:"puede_elegir", t:"chips", label:"¿Podría elegir para este viaje entre su modo actual y el transporte público?", req:1, opts:OP.sn},
-      {k:"tp_directo", t:"chips", label:"¿Existe un bus directo que le permita llegar al mismo destino, con el mismo motivo, a la hora planteada?", req:1, opts:OP.sn},
-      {k:"_filtro", t:"info", html:d=>{ const r = filtro(d); return r==="Aplica" ? "" : esc(r)+". Complete el resto de la encuesta; el bloque de fichas se omitirá."; }, cls:"warn", show:d=>filtro(d)!=="Aplica"},
-      {t:"h", label:"Viaje de referencia"},
-      {k:"hora_salida", t:"time", label:"Hora habitual de salida"},
-      {k:"permanencia_h", t:"num", label:"Permanencia en destino", unit:"horas"},
-      {k:"tiempo_viaje_min", t:"dur", label:"¿Cuánto tiempo dura el viaje, puerta a puerta?", req:1,
-        help: M==="TAXI" ? "Incluya la espera del vehículo, el recorrido y la caminata." : "Incluya conducción, búsqueda de estacionamiento y caminata desde y hacia el vehículo."},
+      {t:"h", label:"Características del viaje"},
+      {k:"tiempo_viaje_min", t:"dur", label:"¿Cuánto tiempo dura el viaje?", req:1, help:"Define el perfil de las fichas: corto hasta 15 min, medio de 15 a 30 min, largo más de 30 min."},
       {k:"_perfil", t:"info", html:d=>infoPerfil(d)},
-      {k:"gasto_percibido", t:"num", unit:"COP", req:d=>!d.gasto_no_sabe, check:{k:"gasto_no_sabe", label:"No sabe"},
-        label: M==="TAXI" ? "Sin hacer cuentas, ¿cuánto paga normalmente por esta ida en taxi o app?"
-                          : "Sin hacer cuentas, ¿cuánto cree que paga de su bolsillo por esta ida, contando gasolina, peaje y el parqueo de esta visita?",
-        help:"Pregunte antes de desglosar los costos. No lea ejemplos monetarios."},
-      {k:"distancia_km", t:"num", label:"Distancia recorrida en la ida", unit:"km", help:"Mismo origen y destino; sin incluir el regreso."},
-      {k:"rendimiento", t:"num", label:"Rendimiento del vehículo", show:veh, unitSel:{k:"rend_unidad", opts:["km/gal","km/L"]}, help:"Si responde en km/L, se convierte a km por galón (× 3,78541)."},
-      {k:"precio_galon", t:"num", label:"Precio de la gasolina", unit:"COP/galón", show:veh},
-      {k:"frac_gasolina", t:"num", label:"Parte de la gasolina que paga el conductor", unit:"%", show:veh, help:"100 % si no comparte el gasto ni recibe reembolso."},
-      {k:"paga_peaje", t:"chips", label:"¿Paga peaje en este viaje?", req:1, opts:OP.sn},
-      {k:"valor_peaje", t:"num", label:"Valor del peaje en esta ida", unit:"COP", show:d=>d.paga_peaje==="S"},
-      {k:"frac_peaje", t:"num", label:"Parte del peaje que paga el conductor", unit:"%", show:d=>veh(d)&&d.paga_peaje==="S"},
-      {k:"estacion_peaje", t:"text", label:"Estación de peaje y sentido de paso", show:d=>d.paga_peaje==="S"},
-      {k:"paga_parqueo", t:"chips", label:"¿Paga estacionamiento?", req:1, show:veh, opts:OP.sn},
-      {k:"costo_parqueo", t:"num", label:"Costo del estacionamiento de toda la estancia", unit:"COP", show:d=>veh(d)&&d.paga_parqueo==="S", help:"Solo el cobro que desaparecería si deja el vehículo."},
-      {k:"frac_parqueo", t:"num", label:"Parte del parqueo que paga el conductor", unit:"%", show:d=>veh(d)&&d.paga_parqueo==="S"},
-      {k:"_costos", t:"info", show:veh, html:d=>infoCostos(d)},
-      {t:"h", label:"Márgenes para usar el transporte público"},
+      {k:"paga_peaje", t:"chips", label:"¿Paga peaje?", req:1, opts:OP.sn},
+      {k:"valor_peaje", t:"num", label:"Valor del peaje", unit:"COP", show:d=>d.paga_peaje==="S"},
+      {k:"paga_parqueo", t:"chips", label:"¿Paga estacionamiento?", req:1, opts:OP.sn},
+      {k:"costo_parqueo", t:"num", label:"Costo del estacionamiento", unit:"COP", show:d=>d.paga_parqueo==="S"},
+      {k:"distancia_km", t:"num", label:"¿Cuántos kilómetros recorre en el viaje?", unit:"km"},
+      {t:"h", label:"Márgenes de uso del servicio"},
       {k:"margen_cuadras", t:"num", label:"¿Cuántas cuadras estaría dispuesto a caminar para empezar a usar el transporte público?", unit:"cuadras"},
       {k:"margen_minutos", t:"num", label:"¿Cuántos minutos está dispuesto a esperar el bus para empezar a usar el transporte público?", unit:"min"}
     );
@@ -490,15 +442,8 @@ function fieldsFor(step, d){
 }
 function infoPerfil(d){
   const p = perfilDe(tiempoPerfil(d));
-  if(!p) return "El perfil de las fichas se asigna con el tiempo del viaje.";
-  return "Perfil asignado: <b>"+p+"</b> ("+tiempoPerfil(d)+" min). Corto: menos de 15 min; medio: de 15 a 30 min; largo: más de 30 min.";
-}
-function infoCostos(d){
-  const c = costosRef(d);
-  if(c.gas == null) return "Complete distancia, rendimiento y precio para ver el costo reconstruido de la ida.";
-  return "<table><tr><td>Gasolina personal</td><td>"+money(c.gas)+"</td></tr><tr><td>Peaje personal</td><td>"+money(c.peaje)+"</td></tr>"+
-    "<tr><td>Parqueo personal de la visita</td><td>"+money(c.parq)+"</td></tr><tr><td><b>Total reconstruido</b></td><td>"+money(c.total)+"</td></tr>"+
-    (c.brecha != null ? "<tr><td>Brecha frente al gasto percibido</td><td>"+(c.brecha>=0?"+":"−")+money(Math.abs(c.brecha))+"</td></tr>" : "")+"</table>";
+  if(!p) return "El perfil de las fichas se asigna con la duración del viaje.";
+  return "Perfil asignado: <b>"+p+"</b> ("+tiempoPerfil(d)+" min). Corto: hasta 15 min; medio: más de 15 y hasta 30 min; largo: más de 30 min.";
 }
 
 /* ---------- Estado de la aplicación ---------- */
@@ -643,7 +588,7 @@ function vElecIntro(){
   const fl = filtro(d);
   if(fl !== "Aplica"){
     rec.elecciones = []; rec.diseno = {perfil:perfilDe(tiempoPerfil(d)), bloque:null, regla:"", filtro:fl};
-    return `<div class="info warn">${esc(fl)}. El bloque de fichas no se aplica a este participante; continúe con el cierre.</div>`;
+    return `<div class="info warn">${esc(fl)}. El registro de elección no se aplica a este encuestado; continúe con el cierre.</div>`;
   }
   const sug = sugerirBloque(rec);
   if(!sug.perfil) return `<div class="info warn">Falta el tiempo del viaje en el paso «Viaje habitual». Regrese y complételo para asignar el perfil.</div>`;
@@ -652,23 +597,23 @@ function vElecIntro(){
     if(!answered){ rec.diseno = Object.assign({}, sug, {filtro:"Aplica", modulo:d.modulo}); rec.elecciones = null; saveDraft(); }
   }
   const ds = rec.diseno, started = rec.elecciones && rec.elecciones.length;
-  const lista = started ? `<div class="flist">${rec.elecciones.map(e=>{ const st = e.respuesta ? "ok" : e.motivo_omision ? "om" : ""; return `<div class="${st}">Ficha ${e.orden}<b>${e.respuesta || (e.motivo_omision?"—":"·")}</b></div>`; }).join("")}</div>` : "";
+  const lista = started ? `<div class="flist">${rec.elecciones.map(e=>{ const st = e.respuesta ? "ok" : e.motivo_omision ? "om" : ""; return `<div class="${st}">Caso ${e.orden}<b>${e.respuesta || (e.motivo_omision?"—":"·")}</b></div>`; }).join("")}</div>` : "";
   const mismatch = started && ds.perfil !== sug.perfil;
-  return `<p class="lead">La ficha se define por el modo y la duración del viaje; se aplica uno de sus dos bloques al azar, con seis tareas en orden aleatorio${d.modulo!=="TPC"?" y con alternancia del lado en que aparece el bus":""}.</p>
+  return `<p class="lead">La ficha se define por el modo y la duración del viaje. Cada escenario tiene dos bloques: se asigna uno al azar y se alterna con el siguiente encuestado. La persona elige A o B en cada uno de los seis casos.</p>
     <div class="info ok"><table>
       <tr><td>Módulo</td><td>${esc(MODS[d.modulo].nombre)}</td></tr>
       <tr><td>Perfil de duración</td><td>${ds.perfil} (${tiempoPerfil(d)} min)</td></tr>
       <tr><td>Regla del bloque</td><td>${esc(ds.regla)}</td></tr>
-      ${ds.gasolina_adaptada!=null && d.modulo!=="TPC" && d.modulo!=="TAXI" ? `<tr><td>Gasolina de las fichas</td><td>${ds.gasolina_adaptada?"Adaptada al viaje":"Valores del banco"}</td></tr>`:""}
+      <tr><td>Escenarios</td><td>${ds.perfil[0]}${ds.bloque}-01 a ${ds.perfil[0]}${ds.bloque}-06</td></tr>
     </table></div>
-    ${mismatch ? `<div class="info warn" style="margin-top:10px">El tiempo del viaje cambió después de iniciar las fichas (perfil actual: ${sug.perfil}). Use «Rehacer bloque» si debe corregirse.</div>`:""}
+    ${mismatch ? `<div class="info warn" style="margin-top:10px">El tiempo del viaje cambió después de iniciar los casos (perfil actual: ${sug.perfil}). Use «Reiniciar casos» si debe corregirse.</div>`:""}
     <div class="fld" style="margin-top:16px"><div class="lbl">Bloque asignado</div>
       <div class="chips">${[1,2].map(b=>`<button type="button" class="chip${ds.bloque===b?" sel":""}" data-bloque="${b}"${started?" disabled":""}>Bloque ${b}</button>`).join("")}</div>
       <div class="help" style="margin-top:6px">Se sugiere automáticamente; modifíquelo solo si el protocolo de campo lo exige.</div></div>
     ${lista}
     <div class="row">
-      ${!started ? `<button class="btn accent" data-act="startF">Iniciar las seis fichas</button>`
-                 : `<button class="btn accent" data-act="contF">${answered<6?"Continuar fichas":"Revisar fichas"}</button><button class="btn danger" data-act="redoF">Rehacer bloque</button>`}
+      ${!started ? `<button class="btn accent" data-act="startF">Iniciar los seis casos</button>`
+                 : `<button class="btn accent" data-act="contF">${answered<6?"Continuar casos":"Revisar casos"}</button><button class="btn danger" data-act="redoF">Reiniciar casos</button>`}
     </div>`;
 }
 
@@ -685,9 +630,7 @@ function fichaRows(e, mod){
       ["tot","Del primer abordaje a la última bajada", tot(A), tot(B), "min"]
     ]};
   }
-  const pv = mod==="AUTO" ? "Automóvil" : mod==="MOTO" ? "Moto" : "Taxi / App";
-  const P = [], T = [];
-  const add = (lab, a, b, u, tot) => { P.push([lab,a,b,u,tot]); };
+  const pv = mod==="AUTO" ? "Automóvil" : mod==="MOTO" ? "Moto" : "App-Taxi";
   const rows = [["sub","Tiempos"]];
   rows.push(["Minutos dentro del vehículo", e.auto_conduccion_min, e.tp_bordo_min, "min"]);
   rows.push([mod==="TAXI" ? "Minutos esperando el taxi o vehículo de app" : "Minutos buscando estacionamiento", e.auto_busca_min, 0, "min"]);
@@ -731,7 +674,7 @@ function vFicha(){
     : "Cero significa que ese rubro no genera pago o tiempo en esa alternativa." + (mod!=="TAXI" ? " El parqueo corresponde a la visita y se carga una sola vez." : "");
   const done = !!(e.respuesta || e.motivo_omision), lastF = S.ficha === rec.elecciones.length-1;
   return `<div class="ficha">
-    <div class="fmeta"><span>Ficha ${S.ficha+1} de ${rec.elecciones.length}</span><span class="tag">${esc(e.ficha)}</span></div>
+    <div class="fmeta"><span>Caso ${S.ficha+1} de ${rec.elecciones.length}</span><span class="tag">${esc(e.ficha)}</span></div>
     ${intro}
     <table class="tbl"><thead><tr><th></th>${heads.map(h=>`<th class="alt${selCls(h[0])}"><b>${h[0]}</b><span>${esc(h[1])}</span></th>`).join("")}</tr></thead><tbody>${body}</tbody></table>
     <p class="q">Si estas fueran sus dos opciones, ¿cuál elegiría: A o B?</p>
@@ -749,8 +692,8 @@ function vFicha(){
     <p class="note">${nota}</p>
   </div>
   <nav class="nav"><div class="in">
-    <button class="btn" data-act="fPrev">${S.ficha===0?"Volver al bloque":"Ficha anterior"}</button>
-    <button class="btn ${lastF?"accent":"primary"}" data-act="fNext"${done?"":" disabled"}>${lastF?"Terminar fichas":"Siguiente ficha"}</button>
+    <button class="btn" data-act="fPrev">${S.ficha===0?"Volver":"Caso anterior"}</button>
+    <button class="btn ${lastF?"accent":"primary"}" data-act="fNext"${done?"":" disabled"}>${lastF?"Terminar casos":"Siguiente caso"}</button>
   </div></nav>`;
 }
 
@@ -765,8 +708,8 @@ function vDone(){
 function vList(){
   const q = queue().slice().reverse();
   return `<h2>Encuestas en el dispositivo</h2>
-  <div class="card scroll">${q.length ? `<table class="list"><thead><tr><th>Fecha</th><th>Módulo</th><th>Municipio</th><th>Fichas</th><th>Estado</th></tr></thead><tbody>
-    ${q.map(r=>`<tr><td>${new Date(r.fin||r.inicio).toLocaleString("es-CO",{dateStyle:"short",timeStyle:"short"})}</td><td>${esc(MODS[r.datos.modulo]?.corto||"")}</td><td>${esc(r.datos.municipio_encuesta||"")}</td>
+  <div class="card scroll">${q.length ? `<table class="list"><thead><tr><th>Fecha</th><th>Módulo</th><th>Municipio</th><th>Perfil / bloque</th><th>Casos</th><th>Estado</th></tr></thead><tbody>
+    ${q.map(r=>`<tr><td>${new Date(r.fin||r.inicio).toLocaleString("es-CO",{dateStyle:"short",timeStyle:"short"})}</td><td>${esc(MODS[r.datos.modulo]?.corto||"")}</td><td>${esc(r.datos.municipio_encuesta||"")}</td><td>${r.diseno&&r.diseno.bloque?esc(r.diseno.perfil)+" / B"+r.diseno.bloque:"—"}</td>
       <td>${(r.elecciones||[]).filter(e=>e.respuesta).length}/${(r.elecciones||[]).length}</td>
       <td><span class="tag ${r.estado==="enviada"?"s":"p"}">${r.estado==="enviada"?"Enviada":"Pendiente"}</span></td></tr>`).join("")}</tbody></table>` : `<p class="muted">Aún no hay encuestas guardadas.</p>`}</div>
   <div class="row"><button class="btn" data-act="home">Volver</button><button class="btn danger" data-act="purge"${!q.some(r=>r.estado==="enviada")?" disabled":""}>Eliminar las ya enviadas</button></div>`;
@@ -779,7 +722,6 @@ function vCfg(){
     <div class="fld"><label for="c_enc" class="req">Encuestador</label><input type="text" id="c_enc" value="${esc(CFG.encuestador)}" placeholder="Nombre o código"></div>
     <div class="fld"><label for="c_url">URL del servidor (Apps Script /exec)</label><input type="url" id="c_url" value="${esc(CFG.url)}" placeholder="https://script.google.com/macros/s/…/exec">
       <div class="help" style="margin-top:6px">Se obtiene al implementar el script como aplicación web.</div></div>
-    <div class="fld"><label for="c_pr">Precio de referencia de la gasolina</label><div class="unit"><input type="number" id="c_pr" value="${esc(CFG.precio)}"><span>COP/galón</span></div></div>
     <div class="fld"><div class="lbl">Identificador del dispositivo</div><div>${esc(CFG.device)}</div></div>
     <p class="small muted">Espacio usado por la aplicación: ${(used/1024).toFixed(0)} KB.</p>
     <div class="row"><button class="btn primary" data-act="saveCfg">Guardar ajustes</button><button class="btn" data-act="testUrl">Probar conexión</button><button class="btn ghost" data-act="home">Volver</button></div>
@@ -803,7 +745,7 @@ function render(){
 function newSurvey(){
   if(!CFG.encuestador){ toast("Registre primero el encuestador en Ajustes"); go("cfg"); return; }
   S.rec = {id:uuid(), version:APP_VERSION, dispositivo:CFG.device, inicio:nowISO(), actualizado:nowISO(), gps:null,
-    datos:{encuestador:CFG.encuestador, frac_gasolina:100, frac_peaje:100, frac_parqueo:100, precio_galon:CFG.precio, rend_unidad:"km/gal"},
+    datos:{encuestador:CFG.encuestador, fecha_encuesta:new Date().toLocaleDateString("es-CO"), hora_encuesta:new Date().toLocaleTimeString("es-CO",{hour:"2-digit",minute:"2-digit"})},
     diseno:null, elecciones:null, estado:"borrador"};
   S.step = 0; saveDraft(); go("form"); captureGPS(true);
 }
@@ -818,19 +760,18 @@ function captureGPS(silent){
 
 /* ---------- Construcción de filas para la base ---------- */
 function filaEncuesta(r){
-  const d = r.datos, c = isPriv(d) && d.modulo!=="TAXI" ? costosRef(d) : {};
+  const d = r.datos;
   const el = r.elecciones || [];
   const o = {
-    id:r.id, modulo:d.modulo, encuestador:d.encuestador, dispositivo:r.dispositivo, version_app:r.version,
+    id:r.id, tipo_encuesta:d.tipo_servicio==="PUB"?"PD Público":"PD Privado", modulo:d.modulo, encuestador:d.encuestador, dispositivo:r.dispositivo, version_app:r.version,
     inicio:r.inicio, fin:r.fin, duracion_min: r.fin ? Math.round((new Date(r.fin)-new Date(r.inicio))/60000) : "",
     lat:r.gps?r.gps.lat:"", lon:r.gps?r.gps.lon:"", precision_m:r.gps?Math.round(r.gps.acc):"",
     perfil:r.diseno?r.diseno.perfil:"", bloque:r.diseno?r.diseno.bloque:"", regla_bloque:r.diseno?r.diseno.regla:"", filtro:r.diseno?r.diseno.filtro:filtro(d),
-    gasolina_adaptada:r.diseno&&r.diseno.gasolina_adaptada!=null?r.diseno.gasolina_adaptada:"",
     fichas_respondidas: el.filter(e=>e.respuesta).length, fichas_omitidas: el.filter(e=>!e.respuesta&&e.motivo_omision).length,
-    n_eligio_tp: isPriv(d) ? el.filter(e=>e.eligio_tp===1).length : "",
-    costo_reconstruido_cop: c.total!=null?Math.round(c.total):"", brecha_percepcion_cop: c.brecha!=null?Math.round(c.brecha):""
+    n_eligio_tp: isPriv(d) ? el.filter(e=>e.eligio_tp===1).length : ""
   };
-  Object.keys(d).forEach(k=>{ if(k.startsWith("_") || k==="modulo" || k==="encuestador") return; const v = d[k]; o[k] = Array.isArray(v) ? v.join("|") : (typeof v==="boolean" ? (v?1:0) : v); });
+  el.forEach(e=>{ o["caso_"+e.orden] = e.respuesta || ""; o["caso_"+e.orden+"_ficha"] = e.ficha; });
+  Object.keys(d).forEach(k=>{ if(k.startsWith("_") || k==="modulo" || k==="encuestador" || k==="tipo_servicio") return; const v = d[k]; o[k] = Array.isArray(v) ? v.join("|") : (typeof v==="boolean" ? (v?1:0) : v); });
   return o;
 }
 function filasElecciones(r){
@@ -840,7 +781,7 @@ function filasElecciones(r){
     const out = [];
     el.forEach(e=>["A","B"].forEach(L=>{
       const x = e[L];
-      out.push({id:r.id, tarea:e.ficha, alternativa:L, elegida: e.respuesta ? (e.respuesta===L?1:0) : "",
+      out.push({id:r.id, caso:e.orden, tarea:e.ficha, alternativa:L, elegida: e.respuesta ? (e.respuesta===L?1:0) : "",
         a_bordo_min:x[0], tarifa_cop:x[1], transbordos:x[2], caminata_enlace_min:x[3], espera_enlace_min:x[4],
         municipio:d.municipio_encuesta, perfil:r.diseno.perfil, bloque:r.diseno.bloque,
         orden:e.orden, catalogo:e.catalogo, segundos:e.segundos ?? "", motivo_omision:e.motivo_omision, usaria:e.usaria, usaria_porque:e.usaria_porque,
@@ -849,13 +790,12 @@ function filasElecciones(r){
     return {priv:[], tpc:out};
   }
   return {tpc:[], priv: el.map(e=>({
-    id:r.id, modulo:d.modulo, orden:e.orden, ficha:e.ficha, catalogo:e.catalogo, perfil:e.perfil, bloque:e.bloque, tarea:e.tarea, peaje_aplica:e.peaje_aplica,
-    distancia_km:e.distancia_km, rendimiento_km_galon:e.rendimiento_km_galon, precio_cop_galon:e.precio_cop_galon, participacion_conductor:e.participacion_conductor,
+    id:r.id, modulo:d.modulo, caso:e.orden, orden:e.orden, ficha:e.ficha, catalogo:e.catalogo, perfil:e.perfil, bloque:e.bloque, tarea:e.tarea, peaje_aplica:e.peaje_aplica,
     auto_conduccion_min:e.auto_conduccion_min, auto_busca_min:e.auto_busca_min, auto_caminata_min:e.auto_caminata_min, auto_total_min:e.auto_total_min,
     gasolina_cop:e.gasolina_cop, peaje_cop:e.peaje_cop, parqueo_cop:e.parqueo_cop, auto_total_cop:e.auto_total_cop,
     tp_bordo_min:e.tp_bordo_min, tp_caminata_min:e.tp_caminata_min, tp_espera_min:e.tp_espera_min, tp_total_min:e.tp_total_min, tp_tarifa_cop:e.tp_tarifa_cop,
     lado_tp:e.lado_tp, respuesta_mostrada:e.respuesta, eligio_tp: e.eligio_tp==null?"":e.eligio_tp, segundos:e.segundos ?? "", motivo_omision:e.motivo_omision,
-    origen:"Campo", municipio:d.municipio_encuesta, fraccion_peaje:e.fraccion_peaje, fraccion_parqueo:e.fraccion_parqueo,
+    origen:"Campo", municipio:d.municipio_encuesta,
     encuestador:d.encuestador, fecha:r.fin
   }))};
 }
@@ -953,7 +893,10 @@ app.addEventListener("click", ev=>{
     d[f.k] = (d[f.k]===o.v && !f.req) ? "" : o.v;
     t.parentElement.querySelectorAll("[data-ck]").forEach(b=>b.classList.toggle("sel", b===t && d[f.k]!==""));
     t.closest(".fld").classList.remove("err");
-    if(f.k==="modulo"){ S.rec.diseno = null; S.rec.elecciones = null; }
+    if(f.k==="tipo_servicio" || f.k==="modo_privado"){
+      const nuevo = moduloDe(d);
+      if(nuevo !== d.modulo){ d.modulo = nuevo; S.rec.diseno = null; S.rec.elecciones = null; saveDraft(); render(); return; }
+    }
     saveDraft(); refreshVisibility(); return;
   }
   if(t.dataset.mk){ // selección múltiple con máximo
@@ -1001,7 +944,6 @@ app.addEventListener("click", ev=>{
     case "saveCfg":
       CFG.encuestador = document.getElementById("c_enc").value.trim();
       CFG.url = document.getElementById("c_url").value.trim();
-      CFG.precio = num(document.getElementById("c_pr").value) || DEFAULT_GAS_PRICE;
       LS.set(K.cfg, CFG); toast("Ajustes guardados"); go("home"); sync(true); break;
     case "testUrl": {
       const u = document.getElementById("c_url").value.trim(); if(!u){ toast("Escriba la URL"); break; }
@@ -1015,8 +957,8 @@ app.addEventListener("click", ev=>{
       if(STEPS[S.step].id === "elec"){
         const rec = S.rec;
         if(filtro(rec.datos)==="Aplica"){
-          if(!rec.elecciones || !rec.elecciones.length){ toast("Inicie y complete las seis fichas"); break; }
-          if(rec.elecciones.some(e=>!e.respuesta && !e.motivo_omision)){ toast("Hay fichas sin respuesta ni motivo de omisión"); break; }
+          if(!rec.elecciones || !rec.elecciones.length){ toast("Inicie y complete los seis casos"); break; }
+          if(rec.elecciones.some(e=>!e.respuesta && !e.motivo_omision)){ toast("Hay casos sin respuesta ni motivo de omisión"); break; }
         }
       }
       S.step = Math.min(STEPS.length-1, S.step+1); saveDraft(); go("form"); break;
@@ -1029,7 +971,7 @@ app.addEventListener("click", ev=>{
     case "fPrev": S._omit = false; if(S.ficha===0) go("form"); else { S.ficha--; go("ficha"); } break;
     case "fNext": S._omit = false;
       if(S.ficha < S.rec.elecciones.length-1){ S.ficha++; go("ficha"); }
-      else { S.step = STEPS.findIndex(s=>s.id==="cierre"); saveDraft(); go("form"); toast("Bloque de fichas completo"); }
+      else { S.step = STEPS.findIndex(s=>s.id==="cierre"); saveDraft(); go("form"); toast("Registro de elección completo"); }
       break;
   }
 });
@@ -1041,7 +983,7 @@ app.addEventListener("input", ev=>{
     const f = S.fields.find(x=>x.k===t.dataset.k);
     d[t.dataset.k] = (t.type==="number") ? (t.value===""?"":Number(t.value)) : t.value;
     if(f && t.dataset.k==="encuestador"){ /* se conserva en el registro */ }
-  } else if(t.dataset.chk){ d[t.dataset.chk] = t.checked; if(t.checked){ d.gasto_percibido = ""; const i = app.querySelector("#f_gasto_percibido"); if(i) i.value = ""; } }
+  } else if(t.dataset.chk){ d[t.dataset.chk] = t.checked; }
   else if(t.dataset.dur){
     const k = t.dataset.dur, box = t.closest(".dur");
     const h = box.querySelector('[data-part="h"]').value, m = box.querySelector('[data-part="m"]').value;
